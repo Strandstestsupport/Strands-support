@@ -126,6 +126,107 @@
 <script>
 const SP = 'https://strandsab.sharepoint.com/:f:/s/Aftersales/IgCYn40pqzMbRoOqLDUeQriXAVinLQoFqQg17TGDdmvMdu0?e=OumEKT';
 
+// ── WEB SEARCH (NO API KEY) + UNANSWERED LOGGING ─────────────────────────────
+const PRODUCT_SITE = 'strandseurope.com';
+const UNANSWERED_KEY = 'strands_unanswered_v1';
+
+function googleSearchUrl(q) {
+  return 'https://www.google.com/search?q=' + encodeURIComponent(q);
+}
+
+function googleSiteSearchUrl(q, site = PRODUCT_SITE) {
+  return 'https://www.google.com/search?q=' + encodeURIComponent('site:' + site + ' ' + q);
+}
+
+function detectArticleNumbers(text) {
+  // Typical Strands article numbers are 6 digits (e.g., 809238).
+  const matches = text.match(/\b\d{6}\b/g) || [];
+  return [...new Set(matches)];
+}
+
+function loadUnanswered() {
+  try {
+    return JSON.parse(localStorage.getItem(UNANSWERED_KEY) || '[]');
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveUnanswered(items) {
+  try {
+    localStorage.setItem(UNANSWERED_KEY, JSON.stringify(items));
+  } catch (e) {
+    // ignore storage errors (private mode / quota)
+  }
+}
+
+function logUnanswered(query, meta = {}) {
+  const items = loadUnanswered();
+  items.push({
+    query: query,
+    lang: meta.lang || (typeof lang !== 'undefined' ? lang : 'en'),
+    articles: meta.articles || [],
+    ts: new Date().toISOString(),
+    ua: navigator.userAgent
+  });
+  // keep last 300 entries to avoid unbounded growth
+  if (items.length > 300) items.splice(0, items.length - 300);
+  saveUnanswered(items);
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderUnansweredReport(limit = 15) {
+  const items = loadUnanswered();
+  const isSv = (typeof lang !== 'undefined' && lang === 'sv');
+  if (!items.length) {
+    return isSv ? 'Inga loggade obesvarade frågor ännu.' : 'No unanswered questions logged yet.';
+  }
+
+  // Count by exact query
+  const counts = new Map();
+  for (const it of items) {
+    const key = (it.query || '').trim();
+    if (!key || key.startsWith('/unanswered')) continue;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+
+  const top = [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+
+  const latest = (items[items.length - 1] && items[items.length - 1].ts) ? items[items.length - 1].ts : '';
+
+  const title = isSv ? 'Obesvarade frågor (topp)' : 'Unanswered questions (top)';
+  const total = isSv ? 'Totalt loggade' : 'Total logged';
+  const last = isSv ? 'Senast' : 'Latest';
+
+  let html = '<b>' + title + '</b><br>' + total + ': ' + items.length + '<br>' + last + ': ' + escapeHtml(latest) + '<br><br>';
+
+  html += top.map(([q, c], i) => {
+    const articles = detectArticleNumbers(q);
+    const productLinks = articles.length
+      ? '<br>' + articles.slice(0, 3).map(a => '🛍️ <a href="' + googleSiteSearchUrl(a) + '" target="_blank" rel="noopener">' + a + '</a>').join(' ')
+      : '';
+    return (i + 1) + '. (' + c + '×) ' + escapeHtml(q) + productLinks;
+  }).join('<br><br>');
+
+  html += '<br><br><i>' + (isSv ? 'Tips: skriv /unanswered clear för att rensa loggen.' : 'Tip: type /unanswered clear to wipe the log.') + '</i>';
+  return html;
+}
+
+function clearUnanswered() {
+  try { localStorage.removeItem(UNANSWERED_KEY); } catch (e) {}
+}
+
+
 // ── LANGUAGE DATA ─────────────────────────────────────────────────────────────
 let lang = 'en';
 
@@ -508,7 +609,24 @@ function findAnswer(query) {
   }
 
   if (bestScore > 0) return bestMatch.answer[lang] || bestMatch.answer.en;
-  return UI[lang].fallback;
+  const fallback = UI[lang].fallback;
+  const g = googleSearchUrl(query);
+  const gs = googleSiteSearchUrl(query, PRODUCT_SITE);
+  const articles = detectArticleNumbers(query);
+
+  // Log unanswered queries so you can see what users miss most (stored locally in the browser).
+  logUnanswered(query, { lang, articles });
+
+  const articleBlock = articles.length ? (
+    '<br><br>🛍️ <b>' + (lang === 'sv' ? 'Produktsida' : 'Product page') + '</b>: ' +
+    articles.slice(0, 3)
+      .map(a => '<a href="' + googleSiteSearchUrl(a, PRODUCT_SITE) + '" target="_blank" rel="noopener">' + a + '</a>')
+      .join(' · ')
+  ) : '';
+
+  return fallback + articleBlock +
+    '<br><br>🔎 <a href="' + g + '" target="_blank" rel="noopener">' + (lang === 'sv' ? 'Sök på Google efter' : 'Search Google for') + ': “' + escapeHtml(query) + '”</a>' +
+    '<br>🌐 <a href="' + gs + '" target="_blank" rel="noopener">' + (lang === 'sv' ? 'Sök på strandseurope.com efter' : 'Search strandseurope.com for') + ': “' + escapeHtml(query) + '”</a>';
 }
 
 // ── UI FUNCTIONS ──────────────────────────────────────────────────────────────
@@ -580,11 +698,31 @@ function sendMessage() {
   document.getElementById('suggestions').style.display = 'none';
   addMessage('user', text);
   input.value = '';
+
+  // Admin / diagnostic commands (local only):
+  // /unanswered            -> show top unanswered queries
+  // /unanswered clear      -> clear log
+  const lower = text.toLowerCase();
+  if (lower === '/unanswered' || lower === '/unanswered top') {
+    showTyping();
+    setTimeout(() => { removeTyping(); addMessage('bot', renderUnansweredReport(15)); }, 350);
+    return;
+  }
+  if (lower === '/unanswered clear') {
+    clearUnanswered();
+    showTyping();
+    setTimeout(() => {
+      removeTyping();
+      addMessage('bot', lang === 'sv' ? 'Loggen är rensad.' : 'Log cleared.');
+    }, 250);
+    return;
+  }
+
   showTyping();
   setTimeout(() => { removeTyping(); addMessage('bot', findAnswer(text)); }, 500 + Math.random() * 300);
 }
 
-window.onload = () => {
+window.onloadwindow.onload = () => {
   renderTabs('all');
   renderSuggestions('all');
   setTimeout(() => addMessage('bot', UI[lang].welcome), 400);
